@@ -1,0 +1,89 @@
+{
+  "target_ip": "192.168.2.10",
+  "pcaps": [
+    {
+      "name": "normal_02",
+      "path": "data/normal/normal_02.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    },
+    {
+      "name": "normal_03",
+      "path": "data/normal/normal_03.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    },
+    {
+      "name": "attack_write_01",
+      "path": "data/attack/attack_write_01.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 116.5,
+          "label": "normal"
+        },
+        {
+          "start": 116.5,
+          "end": 126.6,
+          "label": "attack_write"
+        },
+        {
+          "start": 126.6,
+          "end": 189.9,
+          "label": "normal"
+        },
+        {
+          "start": 189.9,
+          "end": 200.1,
+          "label": "attack_write"
+        },
+        {
+          "start": 200.1,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    },
+    {
+      "name": "attack_scan_02",
+      "path": "data/attack/attack_scan_02.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 74.5,
+          "label": "normal"
+        },
+        {
+          "start": 74.5,
+          "end": 82.5,
+          "label": "attack_scan"
+        },
+        {
+          "start": 82.5,
+          "end": 121.6,
+          "label": "normal"
+        },
+        {
+          "start": 121.6,
+          "end": 129.3,
+          "label": "attack_scan"
+        },
+        {
+          "start": 129.3,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    }
+  ]
+}

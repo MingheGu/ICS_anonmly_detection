@@ -1,0 +1,26 @@
+.DS_Store
+
+# Python environments and caches
+.venv-ml/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Raw data and generated experiment outputs
+data/
+artifacts/
+
+# Trained models and intermediate arrays
+*.pt
+*.pth
+*.npz
+
+# Logs and local scratch files
+*.log
+*.tmp
+*.swp
