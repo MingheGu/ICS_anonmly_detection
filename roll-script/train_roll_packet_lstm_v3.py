@@ -162,7 +162,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="artifacts/rolling_fc_address/packet_results_v2",
+        default="artifacts/rolling_fc_address/packet_results_v3",
         help="Directory for packet-level rolling LSTM outputs.",
     )
     parser.add_argument("--context-length", type=int, default=30)
@@ -276,13 +276,13 @@ def main() -> None:
     holdout_raw_scores = anomaly_scores(model, holdout_contexts, holdout_targets, device) if len(holdout_contexts) else np.array([])
     test_raw_scores = anomaly_scores(model, test_contexts, test_targets, device)
 
-    val_scores = smooth_scores(val_raw_scores, args.smooth_window)
-    holdout_scores = smooth_scores(holdout_raw_scores, args.smooth_window) if len(holdout_raw_scores) else np.array([])
-    test_scores = smooth_scores(test_raw_scores, args.smooth_window)
+    val_scores = val_raw_scores
+    holdout_scores = holdout_raw_scores if len(holdout_raw_scores) else np.array([])
+    test_scores = test_raw_scores
 
     smoothed_val_max = float(np.max(val_scores))
     quantile_threshold = float(np.quantile(val_scores, args.validation_quantile))
-    threshold = float(max(quantile_threshold, 1e-6))
+    threshold = float(max(smoothed_val_max, 1e-6))
     test_pred = (test_scores >= threshold).astype(int)
 
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -307,7 +307,7 @@ def main() -> None:
                 "smoothed_val_max": smoothed_val_max,
                 "quantile_threshold": quantile_threshold,
                 "validation_quantile": args.validation_quantile,
-                "smooth_window": args.smooth_window,
+                "smooth_window": 1,
                 "context_length": args.context_length,
                 "epochs_requested": args.epochs,
                 "epochs_run": int(len(train_losses)),
@@ -397,7 +397,7 @@ def main() -> None:
             "threshold": threshold,
             "smoothed_val_max": smoothed_val_max,
             "quantile_threshold": quantile_threshold,
-            "smooth_window": args.smooth_window,
+            "smooth_window": 1,
             "best_epoch": best_epoch,
             "best_validation_loss": best_val_loss,
             "token_to_idx": token_to_idx,
@@ -420,7 +420,7 @@ def main() -> None:
         "smoothed_val_max": smoothed_val_max,
         "quantile_threshold": quantile_threshold,
         "validation_quantile": args.validation_quantile,
-        "smooth_window": args.smooth_window,
+        "smooth_window": 1,
         "train_rows": int(len(train_contexts)),
         "validation_rows": int(len(val_contexts)),
         "normal_holdout_rows": int(len(holdout_contexts)),
