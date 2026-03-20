@@ -28,6 +28,45 @@ def label_for_offset(offset_s: float, segments: list[dict[str, Any]]) -> str:
     return str(segments[-1]["label"])
 
 
+def refine_packet_label(
+    coarse_label: str,
+    features: dict[str, Any],
+    attacker_ip: str,
+    target_ip: str,
+) -> str:
+    if coarse_label == "normal":
+        return "normal"
+
+    src_ip = str(features["src_ip"])
+    dst_ip = str(features["dst_ip"])
+    protocol = str(features["protocol"])
+    dst_port = int(features["dst_port"])
+    function_code = int(features["function_code"])
+    tcp_flags = str(features["tcp_flags"])
+    payload_len = int(features["payload_len"])
+
+    if src_ip != attacker_ip or dst_ip != target_ip:
+        return "normal"
+
+    if coarse_label == "attack_write":
+        if dst_port == 502 and function_code == 5:
+            return "attack_write"
+        return "normal"
+
+    if coarse_label == "attack_scan":
+        if protocol == "ICMP":
+            return "attack_scan"
+        if protocol == "TCP":
+            is_syn_probe = "S" in tcp_flags and "A" not in tcp_flags
+            is_non_modbus_probe = dst_port != 502
+            is_non_modbus_payload = dst_port != 502 and payload_len > 0
+            if is_syn_probe or is_non_modbus_probe or is_non_modbus_payload:
+                return "attack_scan"
+        return "normal"
+
+    return coarse_label
+
+
 def extract_packet_features(packet: Any, target_ip: str) -> dict[str, Any] | None:
     if IP not in packet:
         return None
@@ -74,6 +113,7 @@ def extract_packet_features(packet: Any, target_ip: str) -> dict[str, Any] | Non
 
 def process_pcap(
     project_root: Path,
+    attacker_ip: str,
     target_ip: str,
     pcap_cfg: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
@@ -92,7 +132,8 @@ def process_pcap(
             if first_timestamp is None:
                 first_timestamp = packet_ts
             offset_s = packet_ts - first_timestamp
-            label = label_for_offset(offset_s, pcap_cfg["segments"])
+            coarse_label = label_for_offset(offset_s, pcap_cfg["segments"])
+            label = refine_packet_label(coarse_label, features, attacker_ip, target_ip)
             label_counts[label] += 1
 
             row = {
@@ -145,7 +186,12 @@ def main() -> None:
     feature_counts: dict[str, Counter[str]] = defaultdict(Counter)
 
     for pcap_cfg in config["pcaps"]:
-        rows, counts = process_pcap(project_root, config["target_ip"], pcap_cfg)
+        rows, counts = process_pcap(
+            project_root,
+            config["attacker_ip"],
+            config["target_ip"],
+            pcap_cfg,
+        )
         all_rows.extend(rows)
         by_pcap_counts[str(pcap_cfg["name"])] = dict(counts)
         label_counts.update(counts)

@@ -1,0 +1,358 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    auc,
+    confusion_matrix,
+    precision_recall_fscore_support,
+    roc_curve,
+)
+from sklearn.preprocessing import StandardScaler
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+
+
+def set_seed(seed: int) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+class RollingLSTMPredictor(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int = 16, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.encoder = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.output = nn.Linear(hidden_size, input_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, (hidden, _) = self.encoder(x)
+        hidden = self.dropout(hidden[-1])
+        return self.output(hidden)
+
+
+def build_samples(
+    df: pd.DataFrame,
+    feature_columns: list[str],
+    context_length: int,
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, object]]]:
+    contexts: list[np.ndarray] = []
+    targets: list[np.ndarray] = []
+    metadata: list[dict[str, object]] = []
+
+    for pcap_name, pcap_df in df.groupby("pcap_name"):
+        pcap_df = pcap_df.sort_values("window_index").reset_index(drop=True)
+        values = pcap_df[feature_columns].to_numpy(dtype=np.float32)
+
+        if len(pcap_df) <= context_length:
+            continue
+
+        for idx in range(context_length, len(pcap_df)):
+            contexts.append(values[idx - context_length:idx])
+            targets.append(values[idx])
+            metadata.append(
+                {
+                    "pcap_name": str(pcap_name),
+                    "window_index": int(pcap_df.loc[idx, "window_index"]),
+                    "window_start_s": float(pcap_df.loc[idx, "window_start_s"]),
+                    "window_end_s": float(pcap_df.loc[idx, "window_end_s"]),
+                    "label": str(pcap_df.loc[idx, "label"]),
+                    "is_anomaly": int(pcap_df.loc[idx, "is_anomaly"]),
+                    "attack_packet_count": int(pcap_df.loc[idx, "attack_packet_count"]),
+                    "attack_packet_ratio": float(pcap_df.loc[idx, "attack_packet_ratio"]),
+                    "split": str(pcap_df.loc[idx, "split"]),
+                }
+            )
+
+    return np.asarray(contexts), np.asarray(targets), metadata
+
+
+def scale_feature_sets(
+    train_df: pd.DataFrame,
+    others: list[pd.DataFrame],
+    feature_columns: list[str],
+) -> tuple[pd.DataFrame, list[pd.DataFrame], StandardScaler]:
+    scaler = StandardScaler()
+    scaler.fit(train_df[feature_columns].to_numpy(dtype=np.float32))
+
+    def transform(df: pd.DataFrame) -> pd.DataFrame:
+        copied = df.copy()
+        copied.loc[:, feature_columns] = scaler.transform(
+            copied[feature_columns].to_numpy(dtype=np.float32)
+        )
+        return copied
+
+    return transform(train_df), [transform(df) for df in others], scaler
+
+
+def apply_feature_mode(
+    df: pd.DataFrame,
+    feature_columns: list[str],
+    feature_mode: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    transformed = df.copy()
+    model_feature_columns: list[str] = []
+
+    if feature_mode == "count":
+        return transformed, feature_columns
+
+    if feature_mode == "binary":
+        for column in feature_columns:
+            new_column = f"bin::{column}"
+            transformed[new_column] = (transformed[column] > 0).astype(float)
+            model_feature_columns.append(new_column)
+        return transformed, model_feature_columns
+
+    if feature_mode == "ratio":
+        denominator = transformed["packet_count"].replace(0, 1).astype(float)
+        for column in feature_columns:
+            new_column = f"ratio::{column}"
+            transformed[new_column] = transformed[column].astype(float) / denominator
+            model_feature_columns.append(new_column)
+        return transformed, model_feature_columns
+
+    raise ValueError(f"Unsupported feature mode: {feature_mode}")
+
+
+def prediction_scores(model: nn.Module, contexts: np.ndarray, targets: np.ndarray, device: torch.device) -> np.ndarray:
+    model.eval()
+    with torch.no_grad():
+        x = torch.tensor(contexts, dtype=torch.float32, device=device)
+        y = torch.tensor(targets, dtype=torch.float32, device=device)
+        pred = model(x)
+        mse = torch.mean((pred - y) ** 2, dim=1)
+    return mse.detach().cpu().numpy()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--window-dataset",
+        default="artifacts/rolling_fc_address/rolling_window_features_fc_address.csv",
+        help="Window-level CSV generated by pre_process_rolling_fc_address.py",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="artifacts/rolling_fc_address/results",
+        help="Directory for rolling LSTM outputs.",
+    )
+    parser.add_argument("--context-length", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--hidden-size", type=int, default=16)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--feature-mode",
+        choices=["count", "binary", "ratio"],
+        default="binary",
+        help="How to represent func-code/address window features for the rolling model.",
+    )
+    parser.add_argument(
+        "--validation-quantile",
+        type=float,
+        default=0.97,
+        help="Quantile of validation prediction error used as anomaly threshold.",
+    )
+    args = parser.parse_args()
+    set_seed(args.seed)
+
+    project_root = Path(__file__).resolve().parents[1]
+    dataset_path = project_root / args.window_dataset
+    output_dir = project_root / args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.read_csv(dataset_path)
+    feature_columns = [column for column in df.columns if column.startswith("fc=")]
+    df, model_feature_columns = apply_feature_mode(df, feature_columns, args.feature_mode)
+
+    train_df = df[df["split"] == "train"].copy()
+    val_df = df[df["split"] == "validation"].copy()
+    holdout_df = df[df["split"] == "normal_holdout"].copy()
+    test_df = df[df["split"] == "test"].copy()
+
+    train_df, [val_df, holdout_df, test_df], scaler = scale_feature_sets(
+        train_df,
+        [val_df, holdout_df, test_df],
+        model_feature_columns,
+    )
+
+    train_contexts, train_targets, train_meta = build_samples(train_df, model_feature_columns, args.context_length)
+    val_contexts, val_targets, val_meta = build_samples(val_df, model_feature_columns, args.context_length)
+    holdout_contexts, holdout_targets, holdout_meta = build_samples(holdout_df, model_feature_columns, args.context_length)
+    test_contexts, test_targets, test_meta = build_samples(test_df, model_feature_columns, args.context_length)
+
+    if len(train_contexts) == 0 or len(val_contexts) == 0 or len(test_contexts) == 0:
+        raise ValueError("One of train/validation/test rolling sample sets is empty.")
+
+    device = torch.device("cpu")
+    model = RollingLSTMPredictor(
+        input_size=len(model_feature_columns),
+        hidden_size=args.hidden_size,
+        dropout=args.dropout,
+    ).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    criterion = nn.MSELoss()
+
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(train_contexts), torch.tensor(train_targets)),
+        batch_size=args.batch_size,
+        shuffle=True,
+    )
+
+    train_losses: list[float] = []
+    val_losses: list[float] = []
+
+    for _epoch in range(args.epochs):
+        model.train()
+        epoch_losses: list[float] = []
+        for batch_x, batch_y in train_loader:
+            batch_x = batch_x.to(device=device, dtype=torch.float32)
+            batch_y = batch_y.to(device=device, dtype=torch.float32)
+            optimizer.zero_grad()
+            pred = model(batch_x)
+            loss = criterion(pred, batch_y)
+            loss.backward()
+            optimizer.step()
+            epoch_losses.append(float(loss.item()))
+
+        train_losses.append(float(np.mean(epoch_losses)))
+        val_scores = prediction_scores(model, val_contexts, val_targets, device)
+        val_losses.append(float(np.mean(val_scores)))
+
+    train_scores = prediction_scores(model, train_contexts, train_targets, device)
+    val_scores = prediction_scores(model, val_contexts, val_targets, device)
+    holdout_scores = prediction_scores(model, holdout_contexts, holdout_targets, device) if len(holdout_contexts) else np.array([])
+    test_scores = prediction_scores(model, test_contexts, test_targets, device)
+
+    threshold = float(np.quantile(val_scores, args.validation_quantile))
+    test_labels = np.array([int(item["is_anomaly"]) for item in test_meta], dtype=np.int64)
+    test_pred = (test_scores >= threshold).astype(int)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        test_labels,
+        test_pred,
+        average="binary",
+        zero_division=0,
+    )
+    tn, fp, fn, tp = confusion_matrix(test_labels, test_pred, labels=[0, 1]).ravel()
+
+    metrics_df = pd.DataFrame(
+        [
+            {
+                "precision": precision,
+                "recall": recall,
+                "f1_score": f1,
+                "tp": int(tp),
+                "fp": int(fp),
+                "tn": int(tn),
+                "fn": int(fn),
+                "threshold": threshold,
+                "validation_quantile": args.validation_quantile,
+                "context_length": args.context_length,
+                "train_rows": int(len(train_contexts)),
+                "validation_rows": int(len(val_contexts)),
+                "normal_holdout_rows": int(len(holdout_contexts)),
+                "test_rows": int(len(test_contexts)),
+            }
+        ]
+    )
+    metrics_df.to_csv(output_dir / "rolling_lstm_metrics.csv", index=False)
+
+    cm = confusion_matrix(test_labels, test_pred, labels=[0, 1])
+    cm_df = pd.DataFrame(cm, index=["normal", "anomaly"], columns=["pred_normal", "pred_anomaly"])
+    cm_df.to_csv(output_dir / "rolling_lstm_confusion_matrix.csv")
+
+    plt.figure(figsize=(5, 4))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["normal", "anomaly"])
+    disp.plot(cmap="Blues", values_format="d")
+    plt.title("Rolling LSTM Confusion Matrix")
+    plt.tight_layout()
+    plt.savefig(output_dir / "rolling_lstm_confusion_matrix.png", dpi=200)
+    plt.close()
+
+    fpr, tpr, _ = roc_curve(test_labels, test_scores)
+    roc_auc = float(auc(fpr, tpr))
+    plt.figure(figsize=(6, 4.5))
+    plt.plot(fpr, tpr, label=f"AUC={roc_auc:.3f}")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("Rolling LSTM ROC Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / "rolling_lstm_roc_curve.png", dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_losses, label="train_loss")
+    plt.plot(val_losses, label="val_pred_error")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Rolling LSTM Training Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / "rolling_lstm_training_curve.png", dpi=200)
+    plt.close()
+
+    test_scores_df = pd.DataFrame(test_meta)
+    test_scores_df["anomaly_score"] = test_scores
+    test_scores_df["pred_is_anomaly"] = test_pred
+    test_scores_df.to_csv(output_dir / "rolling_test_window_scores.csv", index=False)
+
+    if len(holdout_meta):
+        holdout_scores_df = pd.DataFrame(holdout_meta)
+        holdout_scores_df["anomaly_score"] = holdout_scores
+        holdout_scores_df["pred_is_anomaly"] = (holdout_scores >= threshold).astype(int)
+        holdout_scores_df.to_csv(output_dir / "rolling_holdout_window_scores.csv", index=False)
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "input_size": int(len(model_feature_columns)),
+            "hidden_size": args.hidden_size,
+            "context_length": args.context_length,
+            "threshold": threshold,
+            "scaler_mean": scaler.mean_.tolist(),
+            "scaler_scale": scaler.scale_.tolist(),
+            "feature_columns": model_feature_columns,
+        },
+        output_dir / "rolling_lstm_model.pt",
+    )
+
+    run_summary = {
+        "window_dataset": str(dataset_path),
+        "output_dir": str(output_dir),
+        "feature_count": int(len(model_feature_columns)),
+        "feature_mode": args.feature_mode,
+        "context_length": args.context_length,
+        "epochs": args.epochs,
+        "threshold": threshold,
+        "validation_quantile": args.validation_quantile,
+        "train_rows": int(len(train_contexts)),
+        "validation_rows": int(len(val_contexts)),
+        "normal_holdout_rows": int(len(holdout_contexts)),
+        "test_rows": int(len(test_contexts)),
+        "roc_auc": roc_auc,
+    }
+    (output_dir / "run_summary.json").write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
+
+    print(metrics_df.to_string(index=False))
+    print(f"ROC AUC: {roc_auc:.4f}")
+    print(f"Outputs written to {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

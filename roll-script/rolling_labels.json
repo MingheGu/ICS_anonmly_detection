@@ -1,0 +1,70 @@
+{
+  "target_ip": "192.168.95.2",
+  "attacker_ip": "192.168.90.6",
+  "pcaps": [
+    {
+      "name": "normal_long_00",
+      "path": "rolling-data/normal/normal_long_00.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    },
+    {
+      "name": "normal_long_03",
+      "path": "rolling-data/normal/normal_long_03.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    },
+    {
+      "name": "mixed_long_03",
+      "path": "rolling-data/mixed/mixed_long_03.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 367.845642,
+          "label": "normal"
+        },
+        {
+          "start": 367.845642,
+          "end": 1176.921184,
+          "label": "attack_scan"
+        },
+        {
+          "start": 1176.921184,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    },
+    {
+      "name": "mixed_long_04",
+      "path": "rolling-data/mixed/mixed_long_04.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 380.466717,
+          "label": "normal"
+        },
+        {
+          "start": 380.466717,
+          "end": 1529.308845,
+          "label": "attack_write"
+        },
+        {
+          "start": 1529.308845,
+          "end": null,
+          "label": "normal"
+        }
+      ]
+    }
+  ]
+}
