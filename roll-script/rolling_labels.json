@@ -65,6 +65,37 @@
           "label": "normal"
         }
       ]
+    },
+    {
+      "name": "mixed_long_conti",
+      "path": "rolling-data/continue_data/mixed_long_conti.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 3614.570765,
+          "label": "normal"
+        },
+        {
+          "start": 3614.570765,
+          "end": 4674.420644,
+          "label": "attack_scan"
+        },
+        {
+          "start": 4674.420644,
+          "end": 5760.503952,
+          "label": "normal"
+        },
+        {
+          "start": 5760.503952,
+          "end": 7219.066592,
+          "label": "attack_write"
+        },
+        {
+          "start": 7219.066592,
+          "end": null,
+          "label": "normal"
+        }
+      ]
     }
   ]
 }

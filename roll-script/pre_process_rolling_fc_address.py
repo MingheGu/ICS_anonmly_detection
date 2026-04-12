@@ -94,7 +94,7 @@ def refine_packet_label(
         return "normal"
 
     if coarse_label == "attack_write":
-        if dst_port == 502 and function_code == 5:
+        if dst_port == 502 and function_code in {5, 6}:
             return "attack_write"
         return "normal"
 
@@ -179,9 +179,52 @@ def assign_packet_split(row: pd.Series) -> str:
         return "train"
     if row["pcap_name"] == "normal_long_03":
         return "validation"
+    if row["pcap_name"] == "mixed_long_conti":
+        return "sliding"
     if row["pcap_name"] in {"mixed_long_03", "mixed_long_04"}:
         return "test"
     return "unused"
+
+
+def bin_port(port: int) -> str:
+    if port == 502:
+        return "502"
+    if port == -1:
+        return "none"
+    return "other"
+
+
+def build_pair_token(row: pd.Series, token_schema: str) -> str:
+    base = (
+        "fc=" + str(int(row["function_code"]))
+        + "|addr=" + str(int(row["address"]))
+    )
+    if token_schema == "fc_address":
+        return base
+    if token_schema == "fc_address_ip":
+        return base + "|src=" + str(row["src_ip"])
+    if token_schema == "fc_address_port":
+        return base + "|dport=" + bin_port(int(row["dst_port"]))
+    if token_schema == "fc_address_ip_port":
+        return (
+            base
+            + "|src=" + str(row["src_ip"])
+            + "|dport=" + bin_port(int(row["dst_port"]))
+        )
+    if token_schema == "fc_address_protocol_port":
+        return (
+            base
+            + "|proto=" + str(row["protocol"])
+            + "|dport=" + bin_port(int(row["dst_port"]))
+        )
+    if token_schema == "fc_address_protocol_port_ip":
+        return (
+            base
+            + "|proto=" + str(row["protocol"])
+            + "|dport=" + bin_port(int(row["dst_port"]))
+            + "|src=" + str(row["src_ip"])
+        )
+    raise ValueError(f"Unsupported token_schema={token_schema}")
 
 
 def main() -> None:
@@ -201,6 +244,19 @@ def main() -> None:
         type=float,
         default=1.0,
         help="Window size in seconds.",
+    )
+    parser.add_argument(
+        "--token-schema",
+        default="fc_address",
+        choices=[
+            "fc_address",
+            "fc_address_ip",
+            "fc_address_port",
+            "fc_address_ip_port",
+            "fc_address_protocol_port",
+            "fc_address_protocol_port_ip",
+        ],
+        help="How to compose the packet token used by downstream sequence models.",
     )
     args = parser.parse_args()
 
@@ -231,10 +287,7 @@ def main() -> None:
     packet_dataset_path = output_dir / "rolling_packet_features_fc_address.csv"
     packet_df = pd.DataFrame(all_rows)
     packet_df["split"] = packet_df.apply(assign_packet_split, axis=1)
-    packet_df["pair_token"] = (
-        "fc=" + packet_df["function_code"].astype(int).astype(str)
-        + "|addr=" + packet_df["address"].astype(int).astype(str)
-    )
+    packet_df["pair_token"] = packet_df.apply(build_pair_token, axis=1, token_schema=args.token_schema)
     write_csv(packet_dataset_path, packet_df.to_dict(orient="records"))
     packet_df["window_index"] = (
         packet_df["time_offset_s"] // args.window_seconds
@@ -312,6 +365,7 @@ def main() -> None:
         "target_ip": config["target_ip"],
         "attacker_ip": config["attacker_ip"],
         "window_seconds": args.window_seconds,
+        "token_schema": args.token_schema,
         "packet_row_count": len(all_rows),
         "packet_label_counts": dict(label_counts),
         "per_pcap_packet_label_counts": by_pcap_counts,
