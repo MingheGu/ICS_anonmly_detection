@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from scapy.all import ICMP, IP, PcapReader, Raw, TCP  # type: ignore
+from scapy.all import IP, PcapReader, Raw, TCP  # type: ignore
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -37,28 +37,34 @@ def extract_packet_features(packet: Any, target_ip: str) -> dict[str, Any] | Non
     if str(ip_layer.dst) != target_ip:
         return None
 
-    protocol = "OTHER"
-    src_port = -1
-    dst_port = -1
+    if TCP not in packet:
+        return None
+
+    tcp_layer = packet[TCP]
+    protocol = "TCP"
+    src_port = int(tcp_layer.sport)
+    dst_port = int(tcp_layer.dport)
+    tcp_flags = str(tcp_layer.flags)
+    payload = bytes(tcp_layer.payload)
+    payload_len = len(payload)
+
+    # Drop pure ACK noise, but keep SYN / FIN / SYN-ACK / payload-bearing packets.
+    if payload_len == 0 and tcp_flags == "A":
+        return None
+
     function_code = -1
     address = -1
-    tcp_flags = ""
-    payload_len = 0
-
-    if TCP in packet:
-        protocol = "TCP"
-        tcp_layer = packet[TCP]
-        src_port = int(tcp_layer.sport)
-        dst_port = int(tcp_layer.dport)
-        tcp_flags = str(tcp_layer.flags)
-        payload_len = len(bytes(tcp_layer.payload))
-        if dst_port == 502 and Raw in packet:
-            data = bytes(packet[Raw].load)
-            if len(data) >= 10:
-                function_code = int(data[7])
-                address = int.from_bytes(data[8:10], byteorder="big")
-    elif ICMP in packet:
-        protocol = "ICMP"
+    if dst_port == 502 and payload_len >= 10:
+        protocol_id = int.from_bytes(payload[2:4], byteorder="big")
+        mbap_length = int.from_bytes(payload[4:6], byteorder="big")
+        candidate_fc = int(payload[7])
+        if (
+            protocol_id == 0
+            and mbap_length == payload_len - 6
+            and 1 <= candidate_fc <= 127
+        ):
+            function_code = candidate_fc
+            address = int.from_bytes(payload[8:10], byteorder="big")
 
     return {
         "src_ip": str(ip_layer.src),
@@ -84,30 +90,17 @@ def refine_packet_label(
 
     src_ip = str(features["src_ip"])
     dst_ip = str(features["dst_ip"])
-    protocol = str(features["protocol"])
-    dst_port = int(features["dst_port"])
-    function_code = int(features["function_code"])
-    tcp_flags = str(features["tcp_flags"])
-    payload_len = int(features["payload_len"])
 
     if src_ip != attacker_ip or dst_ip != target_ip:
         return "normal"
 
-    if coarse_label == "attack_write":
-        if dst_port == 502 and function_code in {5, 6}:
-            return "attack_write"
-        return "normal"
+    if coarse_label in {"attack_inject", "attack_inject_slow", "attack_inject_fuzz", "attack_write"}:
+        if features["dst_port"] == 502 and features["function_code"] in {5, 6}:
+            return "attack_inject"
+        return "normal"  # TCP handshake, reads from attacker, etc.
 
-    if coarse_label == "attack_scan":
-        if protocol == "ICMP":
-            return "attack_scan"
-        if protocol == "TCP":
-            is_syn_probe = "S" in tcp_flags and "A" not in tcp_flags
-            is_non_modbus_probe = dst_port != 502
-            is_non_modbus_payload = dst_port != 502 and payload_len > 0
-            if is_syn_probe or is_non_modbus_probe or is_non_modbus_payload:
-                return "attack_scan"
-        return "normal"
+    if coarse_label in {"attack_scan", "attack_scan_slow"}:
+        return "attack_scan"
 
     return coarse_label
 
@@ -125,13 +118,14 @@ def process_pcap(
 
     with PcapReader(str(pcap_path)) as reader:
         for packet in reader:
+            packet_ts = float(packet.time)
+            if first_timestamp is None:
+                first_timestamp = packet_ts
+
             features = extract_packet_features(packet, target_ip)
             if not features:
                 continue
 
-            packet_ts = float(packet.time)
-            if first_timestamp is None:
-                first_timestamp = packet_ts
             offset_s = packet_ts - first_timestamp
 
             coarse_label = label_for_offset(offset_s, pcap_cfg["segments"])
@@ -174,7 +168,33 @@ def assign_split(row: pd.Series) -> str:
     return "unused"
 
 
-def assign_packet_split(row: pd.Series) -> str:
+def assign_split_session(
+    row: pd.Series,
+    session_attack_onset_s: float | None,
+    session_train_fraction: float,
+) -> str:
+    if row["pcap_name"] == "normal_long_00":
+        return "train"
+    if row["pcap_name"] == "normal_long_03":
+        return "validation"
+    if row["pcap_name"] in {"mixed_long_03", "mixed_long_04"}:
+        return "test"
+    if row["pcap_name"] == "session_ics" and session_attack_onset_s is not None:
+        t = float(row["window_start_s"])
+        train_cutoff = session_attack_onset_s * session_train_fraction
+        if t < train_cutoff:
+            return "train"
+        if t < session_attack_onset_s:
+            return "validation"
+        return "test"
+    return "unused"
+
+
+def assign_packet_split(
+    row: pd.Series,
+    session_attack_onset_s: float | None = None,
+    session_train_fraction: float = 0.8,
+) -> str:
     if row["pcap_name"] == "normal_long_00":
         return "train"
     if row["pcap_name"] == "normal_long_03":
@@ -182,6 +202,14 @@ def assign_packet_split(row: pd.Series) -> str:
     if row["pcap_name"] == "mixed_long_conti":
         return "sliding"
     if row["pcap_name"] in {"mixed_long_03", "mixed_long_04"}:
+        return "test"
+    if row["pcap_name"] == "session_ics" and session_attack_onset_s is not None:
+        t = float(row["time_offset_s"])
+        train_cutoff = session_attack_onset_s * session_train_fraction
+        if t < train_cutoff:
+            return "train"
+        if t < session_attack_onset_s:
+            return "validation"
         return "test"
     return "unused"
 
@@ -258,6 +286,21 @@ def main() -> None:
         ],
         help="How to compose the packet token used by downstream sequence models.",
     )
+    parser.add_argument(
+        "--session-attack-onset-s",
+        type=float,
+        default=None,
+        help="For session_ics: offset in seconds where attacks begin. "
+             "Packets before this * train_fraction \u2192 train, "
+             "this * train_fraction to this \u2192 validation, "
+             "after this \u2192 test.",
+    )
+    parser.add_argument(
+        "--session-train-fraction",
+        type=float,
+        default=0.8,
+        help="Fraction of the normal period used for training (rest = validation).",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -286,7 +329,12 @@ def main() -> None:
 
     packet_dataset_path = output_dir / "rolling_packet_features_fc_address.csv"
     packet_df = pd.DataFrame(all_rows)
-    packet_df["split"] = packet_df.apply(assign_packet_split, axis=1)
+    onset = args.session_attack_onset_s
+    frac = args.session_train_fraction
+    packet_df["split"] = packet_df.apply(
+        lambda row: assign_packet_split(row, onset, frac),
+        axis=1,
+    )
     packet_df["pair_token"] = packet_df.apply(build_pair_token, axis=1, token_schema=args.token_schema)
     write_csv(packet_dataset_path, packet_df.to_dict(orient="records"))
     packet_df["window_index"] = (
@@ -355,7 +403,10 @@ def main() -> None:
         (window_df["window_index"] + 1) * args.window_seconds
     )
 
-    window_df["split"] = window_df.apply(assign_split, axis=1)
+    window_df["split"] = window_df.apply(
+        lambda row: assign_split_session(row, onset, frac),
+        axis=1,
+    )
     window_df = window_df.sort_values(["pcap_name", "window_index"]).reset_index(drop=True)
 
     window_dataset_path = output_dir / "rolling_window_features_fc_address.csv"

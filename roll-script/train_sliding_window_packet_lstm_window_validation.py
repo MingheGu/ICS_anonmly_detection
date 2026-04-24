@@ -33,6 +33,10 @@ from train_roll_packet_lstm_v2 import (  # type: ignore
 )
 
 
+def resolve_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def build_time_windows(
     df: pd.DataFrame,
     train_duration_s: float,
@@ -63,8 +67,45 @@ def build_time_windows(
     return windows
 
 
+def build_fixed_train_windows(
+    df: pd.DataFrame,
+    fixed_train_end_s: float,
+    test_duration_s: float,
+    step_s: float,
+) -> list[dict[str, float]]:
+    """Train window is fixed at [0, fixed_train_end_s]. Only test window slides."""
+    end_time = float(df["time_offset_s"].max())
+    test_start = fixed_train_end_s
+    windows: list[dict[str, float]] = []
+    while test_start + test_duration_s <= end_time:
+        windows.append({
+            "train_start_s": 0.0,
+            "train_end_s": fixed_train_end_s,
+            "test_start_s": round(test_start, 6),
+            "test_end_s": round(test_start + test_duration_s, 6),
+        })
+        test_start += step_s
+    return windows
+
+
 def slice_by_time(df: pd.DataFrame, start_s: float, end_s: float) -> pd.DataFrame:
     return df[(df["time_offset_s"] >= start_s) & (df["time_offset_s"] < end_s)].copy()
+
+
+def filter_packet_rows(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, int]]:
+    original_rows = int(len(df))
+    filtered_df = df.copy()
+
+    if args.exclude_tcp_fc_minus1:
+        filtered_df = filtered_df[
+            ~((filtered_df["protocol"] == "TCP") & (filtered_df["function_code"].astype(int) == -1))
+        ].copy()
+
+    summary = {
+        "original_rows": original_rows,
+        "filtered_rows": int(len(filtered_df)),
+    }
+    return filtered_df, summary
 
 
 def create_model(args: argparse.Namespace) -> nn.Module:
@@ -74,7 +115,7 @@ def create_model(args: argparse.Namespace) -> nn.Module:
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
-    ).to(torch.device("cpu"))
+    ).to(resolve_device())
 
 
 def fit_model(
@@ -88,7 +129,7 @@ def fit_model(
     if len(train_contexts) == 0 or len(val_contexts) == 0:
         raise ValueError("Train or validation sample set is empty.")
 
-    device = torch.device("cpu")
+    device = resolve_device()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = nn.CrossEntropyLoss()
     train_loader = DataLoader(
@@ -338,10 +379,14 @@ def run_one_window(
     model, train_summary = fit_model(model, train_contexts, train_targets, val_contexts, val_targets, args)
     device = torch.device(str(train_summary["device"]))
     val_scores = score_samples(model, val_contexts, val_targets, args, device)
-    threshold, quantile_threshold = compute_threshold_from_scores(val_scores, args)
 
     test_raw_scores = anomaly_scores(model, test_contexts, test_targets, device, batch_size=args.score_batch_size)
     test_scores = smooth_scores(test_raw_scores, args.smooth_window)
+    if args.threshold_method == "test_quantile":
+        threshold = float(np.quantile(test_scores, args.test_anomaly_quantile))
+        quantile_threshold = threshold
+    else:
+        threshold, quantile_threshold = compute_threshold_from_scores(val_scores, args)
     test_labels = test_meta_df["is_attack"].astype(int).to_numpy()
     test_pred, metric_values = compute_metrics_at_threshold(test_labels, test_scores, threshold)
 
@@ -369,8 +414,8 @@ def run_one_window(
         "test_samples": int(len(test_contexts)),
         "train_attack_frac": float(train_proper_df["is_attack"].mean()) if len(train_proper_df) else 0.0,
         "test_attack_frac": float(test_meta_df["is_attack"].mean()) if len(test_meta_df) else 0.0,
-        "threshold_calibration_mode": "per_window_validation",
-        "threshold_calibration_split": "window_validation",
+        "threshold_calibration_mode": "test_quantile" if args.threshold_method == "test_quantile" else "per_window_validation",
+        "threshold_calibration_split": "test_window" if args.threshold_method == "test_quantile" else "window_validation",
         "threshold": threshold,
         "quantile_threshold": quantile_threshold,
         "calib_score_mean": float(np.mean(val_scores)),
@@ -383,6 +428,93 @@ def run_one_window(
         **metric_values,
     }
     return metrics_row, scores_df, list(train_summary["train_losses"]), list(train_summary["val_losses"])
+
+
+def run_fixed_train_mode(
+    df: pd.DataFrame,
+    windows: list[dict[str, float]],
+    token_to_idx: dict[str, int],
+    args: argparse.Namespace,
+) -> tuple[list[dict[str, Any]], pd.DataFrame, list[float], list[float]]:
+    """Train once on fixed window, score each sliding test window without retraining."""
+    if not windows:
+        return [], pd.DataFrame(), [], []
+
+    fixed_window = windows[0]
+    train_df = slice_by_time(df, fixed_window["train_start_s"], fixed_window["train_end_s"])
+
+    val_cutoff_s = fixed_window["train_start_s"] + (
+        fixed_window["train_end_s"] - fixed_window["train_start_s"]
+    ) * (1.0 - args.val_fraction)
+    train_proper_df = train_df[train_df["time_offset_s"] < val_cutoff_s].copy()
+    val_df = train_df[train_df["time_offset_s"] >= val_cutoff_s].copy()
+
+    if args.oracle_clean_normal_only:
+        train_proper_df = train_proper_df[train_proper_df["is_attack"] == 0].copy()
+        val_df = val_df[val_df["is_attack"] == 0].copy()
+
+    train_contexts, train_targets, _ = build_packet_samples(train_proper_df, args.context_length, token_to_idx)
+    val_contexts, val_targets, _ = build_packet_samples(val_df, args.context_length, token_to_idx)
+
+    model = create_model(args)
+    model, train_summary = fit_model(model, train_contexts, train_targets, val_contexts, val_targets, args)
+    device = torch.device(str(train_summary["device"]))
+
+    val_scores = score_samples(model, val_contexts, val_targets, args, device)
+    if args.threshold_method != "test_quantile":
+        global_threshold, global_quantile_threshold = compute_threshold_from_scores(val_scores, args)
+
+    metrics_rows: list[dict[str, Any]] = []
+    all_scores: list[pd.DataFrame] = []
+
+    for window_step, window in enumerate(windows, start=1):
+        test_contexts, test_targets, test_meta_df = build_test_samples_with_context(
+            df, window["test_start_s"], window["test_end_s"], args.context_length, token_to_idx,
+        )
+        if len(test_contexts) == 0:
+            metrics_rows.append({
+                "window_step": window_step, **window,
+                "status": "skipped", "skip_reason": "empty_test",
+            })
+            continue
+
+        test_raw_scores = anomaly_scores(model, test_contexts, test_targets, device, batch_size=args.score_batch_size)
+        test_scores = smooth_scores(test_raw_scores, args.smooth_window)
+        if args.threshold_method == "test_quantile":
+            threshold = float(np.quantile(test_scores, args.test_anomaly_quantile))
+            quantile_threshold = threshold
+        else:
+            threshold = global_threshold
+            quantile_threshold = global_quantile_threshold
+        test_labels = test_meta_df["is_attack"].astype(int).to_numpy()
+        test_pred, metric_values = compute_metrics_at_threshold(test_labels, test_scores, threshold)
+
+        scores_df = test_meta_df.copy()
+        scores_df["window_step"] = window_step
+        scores_df["train_start_s"] = fixed_window["train_start_s"]
+        scores_df["train_end_s"] = fixed_window["train_end_s"]
+        scores_df["test_start_s"] = window["test_start_s"]
+        scores_df["test_end_s"] = window["test_end_s"]
+        scores_df["raw_anomaly_score"] = test_raw_scores
+        scores_df["anomaly_score"] = test_scores
+        scores_df["pred_is_anomaly"] = test_pred
+        scores_df["threshold"] = threshold
+        all_scores.append(scores_df)
+
+        metrics_rows.append({
+            "window_step": window_step, **window,
+            "status": "ok", "skip_reason": "",
+            "train_packets": int(len(train_proper_df)),
+            "val_packets": int(len(val_df)),
+            "test_packets": int(len(test_meta_df)),
+            "threshold": threshold,
+            "quantile_threshold": quantile_threshold,
+            "threshold_calibration_mode": "test_quantile" if args.threshold_method == "test_quantile" else "fixed_train",
+            **metric_values,
+        })
+
+    combined_scores = pd.concat(all_scores, ignore_index=True) if all_scores else pd.DataFrame()
+    return metrics_rows, combined_scores, list(train_summary["train_losses"]), list(train_summary["val_losses"])
 
 
 def plot_score_timeline(
@@ -459,6 +591,13 @@ def main() -> None:
     parser.add_argument("--train-duration-s", type=float, default=900.0)
     parser.add_argument("--test-duration-s", type=float, default=300.0)
     parser.add_argument("--step-s", type=float, default=120.0)
+    parser.add_argument(
+        "--fixed-train-end-s",
+        type=float,
+        default=0.0,
+        help="If > 0, enable fixed-train mode: train ONCE on [0, fixed_train_end_s], "
+             "then slide only the test window. No retraining per window.",
+    )
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument(
         "--oracle-clean-normal-only",
@@ -483,15 +622,27 @@ def main() -> None:
     parser.add_argument(
         "--threshold-method",
         default="sigma",
-        choices=["quantile", "sigma"],
+        choices=["quantile", "sigma", "test_quantile"],
         help="'sigma' sets threshold = mean + k*std of calibration scores (robust when normal scores cluster near zero); "
-             "'quantile' uses the validation_quantile percentile (original behaviour).",
+             "'quantile' uses the validation_quantile percentile (original behaviour); "
+             "'test_quantile' sets a per-test-window threshold at the test score quantile.",
     )
     parser.add_argument(
         "--threshold-sigma",
         type=float,
         default=4.0,
         help="Number of standard deviations above the calibration mean to use as threshold (--threshold-method sigma only).",
+    )
+    parser.add_argument(
+        "--test-anomaly-quantile",
+        type=float,
+        default=0.99,
+        help="Quantile of test scores used as threshold when --threshold-method test_quantile.",
+    )
+    parser.add_argument(
+        "--exclude-tcp-fc-minus1",
+        action="store_true",
+        help="Drop packets where protocol == TCP and function_code == -1 before building windows.",
     )
     args = parser.parse_args()
 
@@ -507,33 +658,45 @@ def main() -> None:
     if df.empty:
         raise ValueError(f"No rows found for pcap_name={args.pcap_name}")
 
+    df, filter_summary = filter_packet_rows(df, args)
+    if df.empty:
+        raise ValueError("No rows remain after packet filtering.")
+
     df = df.sort_values("timestamp").reset_index(drop=True)
     token_to_idx = build_token_mapping(df)
     args.vocab_size = len(token_to_idx)
-    windows = build_time_windows(df, args.train_duration_s, args.test_duration_s, args.step_s)
-
-    metrics_rows: list[dict[str, Any]] = []
-    all_scores: list[pd.DataFrame] = []
-    last_train_losses: list[float] = []
-    last_val_losses: list[float] = []
-
-    for window_step, window in enumerate(windows, start=1):
-        metrics_row, scores_df, train_losses, val_losses = run_one_window(
-            df,
-            window_step,
-            window,
-            token_to_idx,
-            args,
+    if args.fixed_train_end_s > 0:
+        windows = build_fixed_train_windows(
+            df, args.fixed_train_end_s, args.test_duration_s, args.step_s
         )
-        metrics_rows.append(metrics_row)
-        if not scores_df.empty:
-            all_scores.append(scores_df)
-        if train_losses and val_losses:
-            last_train_losses = train_losses
-            last_val_losses = val_losses
+    else:
+        windows = build_time_windows(
+            df, args.train_duration_s, args.test_duration_s, args.step_s
+        )
 
-    metrics_df = pd.DataFrame(metrics_rows)
-    scores_df = pd.concat(all_scores, ignore_index=True) if all_scores else pd.DataFrame()
+    if args.fixed_train_end_s > 0:
+        metrics_rows, scores_df_final, last_train_losses, last_val_losses = run_fixed_train_mode(
+            df, windows, token_to_idx, args
+        )
+        metrics_df = pd.DataFrame(metrics_rows)
+        scores_df = scores_df_final
+    else:
+        metrics_rows = []
+        all_scores = []
+        last_train_losses = []
+        last_val_losses = []
+        for window_step, window in enumerate(windows, start=1):
+            metrics_row, scores_df_w, train_losses, val_losses = run_one_window(
+                df, window_step, window, token_to_idx, args,
+            )
+            metrics_rows.append(metrics_row)
+            if not scores_df_w.empty:
+                all_scores.append(scores_df_w)
+            if train_losses and val_losses:
+                last_train_losses = train_losses
+                last_val_losses = val_losses
+        metrics_df = pd.DataFrame(metrics_rows)
+        scores_df = pd.concat(all_scores, ignore_index=True) if all_scores else pd.DataFrame()
 
     metrics_path = output_dir / "sliding_window_step_metrics.csv"
     scores_path = output_dir / "sliding_window_all_scores.csv"
@@ -567,6 +730,7 @@ def main() -> None:
         "train_duration_s": args.train_duration_s,
         "test_duration_s": args.test_duration_s,
         "step_s": args.step_s,
+        "fixed_train_end_s": args.fixed_train_end_s,
         "val_fraction": args.val_fraction,
         "oracle_clean_normal_only": bool(args.oracle_clean_normal_only),
         "self_clean_rounds": args.self_clean_rounds,
@@ -574,9 +738,16 @@ def main() -> None:
         "context_length": args.context_length,
         "smooth_window": args.smooth_window,
         "validation_quantile": args.validation_quantile,
-        "threshold_calibration_mode": "per_window_validation",
-        "threshold_calibration_split": "window_validation",
+        "test_anomaly_quantile": args.test_anomaly_quantile,
+        "threshold_calibration_mode": (
+            "test_quantile"
+            if args.threshold_method == "test_quantile"
+            else ("fixed_train" if args.fixed_train_end_s > 0 else "per_window_validation")
+        ),
+        "threshold_calibration_split": "test_window" if args.threshold_method == "test_quantile" else "window_validation",
         "vocab_size": len(token_to_idx),
+        "exclude_tcp_fc_minus1": bool(args.exclude_tcp_fc_minus1),
+        **filter_summary,
     }
     (output_dir / "run_summary.json").write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
 

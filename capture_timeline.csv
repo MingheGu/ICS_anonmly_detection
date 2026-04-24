@@ -1,0 +1,25 @@
+1776024516,2026-04-12T21:08:36+01:00,normal,hmi_monitoring
+1776083436,2026-04-13T13:30:36+01:00,attack_scan,recon_start
+1776084863,2026-04-13T13:54:23+01:00,attack_inject,recon_start
+1776085209,2026-04-13T14:00:09+01:00,attack_scan,recon_start
+1776085520,2026-04-13T14:05:20+01:00,attack_scan,recon_start
+1776086379,2026-04-13T14:19:39+01:00,attack_scan_slow,recon_start
+1776086586,2026-04-13T14:23:06+01:00,attack_scan_slow,recon_start
+1776087083,2026-04-13T14:31:23+01:00,attack_scan_slow,recon_start
+1776089395,2026-04-13T15:09:55+01:00,attack_slow inte,recon_start
+1776090752,2026-04-13T15:32:32+01:00,attack_fuzz inte,recon_start
+1776953496,2026-04-23T15:11:36+01:00,normal,start
+1776961592,2026-04-23T17:26:32+01:00,attack_inject,start
+1776961884,2026-04-23T17:31:24+01:00,attack_inject,end
+1776962791,2026-04-23T17:46:31+01:00,attack_inject,start
+1776963105,2026-04-23T17:51:45+01:00,attack_inject,end
+1776963866,2026-04-23T18:04:26+01:00,attack_inject_internal,start
+1776964363,2026-04-23T18:12:43+01:00,attack_inject_internal,end
+1776964910,2026-04-23T18:21:50+01:00,attack_slow_external,start
+1776965737,2026-04-23T18:35:37+01:00,attack_slow_external,end
+1776966362,2026-04-23T18:46:02+01:00,attack_slow_internal,start
+1776967074,2026-04-23T18:57:54+01:00,attack_slow_internal,end
+1776967686,2026-04-23T19:08:06+01:00,attack_stealth_write_internal,start
+1776968406,2026-04-23T19:20:06+01:00,attack_stealth_write_internal,end
+1776968858,2026-04-23T19:27:38+01:00,attack_scan,start
+1776969237,2026-04-23T19:33:57+01:00,attack_scan,end

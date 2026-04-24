@@ -12,6 +12,7 @@ from train_roll_packet_ocsvm import (
     FEATURE_SETS,
     build_preprocessor,
     build_splits,
+    compute_threshold_from_scores,
     compute_metrics,
     find_f1_optimal_threshold,
     prepare_df,
@@ -36,12 +37,28 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--feature-set",
-        default="packet_full",
+        default="fc_address_ip",
         choices=sorted(FEATURE_SETS.keys()),
-        help="Which per-packet feature subset to use.",
+        help="Which per-packet feature subset to use. "
+             "fc_address_ip is recommended when scans and writes share Modbus/TCP control traffic.",
     )
     parser.add_argument("--n-estimators", type=int, default=300)
     parser.add_argument("--max-samples", default="auto")
+    parser.add_argument(
+        "--threshold-method",
+        default="sigma",
+        choices=["quantile", "sigma"],
+        help="'sigma' sets threshold = mean + k*std of validation scores "
+             "(recommended when normal scores pile up at a few discrete values); "
+             "'quantile' uses the validation_quantile percentile.",
+    )
+    parser.add_argument(
+        "--threshold-sigma",
+        type=float,
+        default=4.0,
+        help="Number of standard deviations above the validation mean to use as threshold "
+             "(--threshold-method sigma only).",
+    )
     parser.add_argument(
         "--validation-quantile",
         type=float,
@@ -89,7 +106,12 @@ def main() -> None:
     native_pred = (model.predict(test_x) == -1).astype(int)
     native_metrics = compute_metrics(test_labels, native_pred, test_scores)
 
-    # --- Method 2: Validation quantile threshold [PRIMARY — matches LSTM protocol] ---
+    # --- Method 2: Validation threshold [PRIMARY] ---
+    threshold, quantile_threshold = compute_threshold_from_scores(val_scores, args)
+    primary_pred = (test_scores >= threshold).astype(int)
+    primary_metrics = compute_metrics(test_labels, primary_pred, test_scores)
+
+    # --- Diagnostic: validation quantile threshold ---
     quantile_threshold = float(np.quantile(val_scores, args.validation_quantile))
     quantile_pred = (test_scores >= quantile_threshold).astype(int)
     quantile_metrics = compute_metrics(test_labels, quantile_pred, test_scores)
@@ -111,8 +133,20 @@ def main() -> None:
     print(f"  TP={native_metrics['tp']} FP={native_metrics['fp']} TN={native_metrics['tn']} FN={native_metrics['fn']}")
 
     print(
+        f"\n=== Validation {args.threshold_method} threshold "
+        f"({threshold:.4f}) [PRIMARY] ==="
+    )
+    print(f"  Precision: {primary_metrics['precision']:.4f}")
+    print(f"  Recall:    {primary_metrics['recall']:.4f}")
+    print(f"  F1:        {primary_metrics['f1_score']:.4f}")
+    print(
+        f"  TP={primary_metrics['tp']} FP={primary_metrics['fp']} "
+        f"TN={primary_metrics['tn']} FN={primary_metrics['fn']}"
+    )
+
+    print(
         f"\n=== Val quantile threshold p{args.validation_quantile * 100:.0f} "
-        f"({quantile_threshold:.4f}) [PRIMARY — matches LSTM protocol] ==="
+        f"({quantile_threshold:.4f}) [secondary diagnostic] ==="
     )
     print(f"  Precision: {quantile_metrics['precision']:.4f}")
     print(f"  Recall:    {quantile_metrics['recall']:.4f}")
@@ -134,14 +168,19 @@ def main() -> None:
     print(f"  F1:        {oracle_metrics['f1_score']:.4f}")
     print(f"  TP={oracle_metrics['tp']} FP={oracle_metrics['fp']} TN={oracle_metrics['tn']} FN={oracle_metrics['fn']}")
 
-    print(f"\n  AUC: {quantile_metrics['roc_auc']:.4f}")
+    print(f"\n  AUC: {primary_metrics['roc_auc']:.4f}")
 
     metrics_row = {
         "model": "Isolation Forest",
-        "threshold_method": "validation_quantile",
-        "threshold": quantile_threshold,
-        **quantile_metrics,
+        "threshold_method": args.threshold_method,
+        "threshold": threshold,
+        **primary_metrics,
         "validation_quantile": args.validation_quantile,
+        "validation_quantile_threshold": quantile_threshold,
+        "validation_quantile_precision": quantile_metrics["precision"],
+        "validation_quantile_recall": quantile_metrics["recall"],
+        "validation_quantile_f1": quantile_metrics["f1_score"],
+        "threshold_sigma": args.threshold_sigma,
         "native_precision": native_metrics["precision"],
         "native_recall": native_metrics["recall"],
         "native_f1": native_metrics["f1_score"],
@@ -165,7 +204,8 @@ def main() -> None:
 
     test_scores_df = test_df.reset_index(drop=True).copy()
     test_scores_df["anomaly_score"] = test_scores
-    test_scores_df["pred_is_anomaly"] = quantile_pred
+    test_scores_df["pred_is_anomaly"] = primary_pred
+    test_scores_df["pred_primary"] = primary_pred
     test_scores_df["pred_validation_quantile"] = quantile_pred
     test_scores_df["pred_native"] = native_pred
     test_scores_df["pred_val_f1"] = val_pred
@@ -187,10 +227,14 @@ def main() -> None:
         "validation_rows": int(len(val_df)),
         "test_rows": int(len(test_df)),
         "feature_dims": int(train_x.shape[1]),
-        "roc_auc": quantile_metrics["roc_auc"],
+        "roc_auc": primary_metrics["roc_auc"],
+        "threshold_method": args.threshold_method,
+        "threshold_sigma": args.threshold_sigma,
         "validation_quantile": args.validation_quantile,
-        "validation_quantile_threshold (PRIMARY)": quantile_threshold,
-        "validation_quantile_metrics (PRIMARY)": quantile_metrics,
+        "primary_threshold": threshold,
+        "primary_metrics": primary_metrics,
+        "validation_quantile_threshold (secondary diagnostic)": quantile_threshold,
+        "validation_quantile_metrics (secondary diagnostic)": quantile_metrics,
         "val_f1_optimal_threshold": val_threshold,
         "val_f1_optimal_metrics (secondary diagnostic)": val_metrics,
         "native_metrics": native_metrics,
@@ -203,7 +247,7 @@ def main() -> None:
         prefix="packet_isolation_forest",
         test_labels=test_labels,
         test_scores=test_scores,
-        test_pred=val_pred,
+        test_pred=primary_pred,
         metrics_row=metrics_row,
         test_scores_df=test_scores_df,
         val_scores_df=val_scores_df,

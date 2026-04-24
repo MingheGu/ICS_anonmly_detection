@@ -1,0 +1,17 @@
+epoch,iso,label,phase
+1776982541,2026-04-23T23:15:41+01:00,normal,start
+1776989741,2026-04-24T01:15:41+01:00,attack_inject,start
+1776990341,2026-04-24T01:25:41+01:00,attack_inject,end
+1776990941,2026-04-24T01:35:41+01:00,attack_inject,start
+1776991541,2026-04-24T01:45:41+01:00,attack_inject,end
+1776992441,2026-04-24T02:00:41+01:00,attack_inject_internal,start
+1776993041,2026-04-24T02:10:41+01:00,attack_inject_internal,end
+1776993641,2026-04-24T02:20:41+01:00,attack_slow_external,start
+1776993941,2026-04-24T02:25:41+01:00,attack_slow_external,end
+1776994241,2026-04-24T02:30:41+01:00,attack_slow_internal,start
+1776994841,2026-04-24T02:40:41+01:00,attack_slow_internal,end
+1776995141,2026-04-24T02:45:41+01:00,attack_stealth_write_internal,start
+1776995441,2026-04-24T02:50:41+01:00,attack_stealth_write_internal,end
+1776995741,2026-04-24T02:55:41+01:00,attack_scan,start
+1776996161,2026-04-24T03:02:41+01:00,attack_scan,end
+1776997362,2026-04-24T03:22:42+01:00,normal,end
