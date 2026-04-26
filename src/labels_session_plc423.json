@@ -1,0 +1,29 @@
+{
+  "_comment": "Labels for session_plc423.pcap. Time windows detected from actual fc bursts in the pcap (not the planned timeline.csv). All times are seconds offset from the first packet in the pcap.",
+  "target_ip": "192.168.95.2",
+  "attacker_ip": "192.168.90.6",
+  "internal_ip": "192.168.95.5",
+  "pcaps": [
+    {
+      "name": "session_plc423",
+      "path": "dataset/session_plc423.pcap",
+      "segments": [
+        {"start": 0,     "end": 7531,  "label": "normal"},
+        {"start": 7531,  "end": 7826,  "label": "attack_inject"},
+        {"start": 7826,  "end": 8480,  "label": "normal"},
+        {"start": 8480,  "end": 8780,  "label": "attack_inject"},
+        {"start": 8780,  "end": 9420,  "label": "normal"},
+        {"start": 9420,  "end": 9719,  "label": "attack_inject_internal"},
+        {"start": 9719,  "end": 10215, "label": "normal"},
+        {"start": 10215, "end": 10778, "label": "attack_slow_external"},
+        {"start": 10778, "end": 11520, "label": "normal"},
+        {"start": 11520, "end": 12060, "label": "attack_slow_internal"},
+        {"start": 12060, "end": 12725, "label": "normal"},
+        {"start": 12725, "end": 13469, "label": "attack_stealth_write_internal"},
+        {"start": 13469, "end": 13951, "label": "normal"},
+        {"start": 13951, "end": 14052, "label": "attack_scan"},
+        {"start": 14052, "end": null,  "label": "normal"}
+      ]
+    }
+  ]
+}

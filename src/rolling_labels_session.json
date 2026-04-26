@@ -1,0 +1,62 @@
+{
+  "target_ip": "192.168.95.2",
+  "attacker_ip": "192.168.90.6",
+  "pcaps": [
+    {
+      "name": "session_ics",
+      "path": "rolling-data/session_20260413/session_ics.pcap",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 7414.589021,
+          "label": "normal"
+        },
+        {
+          "start": 7414.589021,
+          "end": 8841.589021,
+          "label": "attack_scan"
+        },
+        {
+          "start": 8841.589021,
+          "end": 9187.589021,
+          "label": "attack_inject"
+        },
+        {
+          "start": 9187.589021,
+          "end": 9498.589021,
+          "label": "attack_scan"
+        },
+        {
+          "start": 9498.589021,
+          "end": 10357.589021,
+          "label": "attack_scan"
+        },
+        {
+          "start": 10357.589021,
+          "end": 10564.589021,
+          "label": "attack_scan_slow"
+        },
+        {
+          "start": 10564.589021,
+          "end": 11061.589021,
+          "label": "attack_scan_slow"
+        },
+        {
+          "start": 11061.589021,
+          "end": 13373.589021,
+          "label": "attack_scan_slow"
+        },
+        {
+          "start": 13373.589021,
+          "end": 14730.589021,
+          "label": "attack_inject_slow"
+        },
+        {
+          "start": 14730.589021,
+          "end": null,
+          "label": "attack_inject_fuzz"
+        }
+      ]
+    }
+  ]
+}
